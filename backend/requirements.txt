@@ -1,0 +1,30 @@
+# --- Web framework ---
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+
+# --- Auth ---
+PyJWT
+
+# --- Persistence ---
+sqlalchemy
+
+# --- Config ---
+python-dotenv
+
+# --- File processing (resume/JD extraction) ---
+pdfplumber
+pypdf
+python-docx
+
+# --- AI interview (LangGraph + OpenAI-compatible vLLM client) ---
+langgraph>=0.2.50
+langchain-openai>=0.2.0
+langchain-core>=0.3.0
+
+# --- Optional: semantic similarity for resume scoring ---
+# On Python versions without a torch wheel this can be skipped; scoring falls
+# back to keyword overlap automatically.
+# sentence-transformers
+# numpy

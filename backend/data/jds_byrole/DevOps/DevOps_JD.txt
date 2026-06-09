@@ -1,0 +1,17 @@
+DevOps Engineer
+
+Seeking a DevOps Engineer to automate and operate cloud infrastructure.
+
+Required Skills:
+- Docker and Kubernetes
+- CI/CD pipelines with Jenkins
+- Terraform and Ansible
+- AWS or Azure
+- Linux and Git
+
+Preferred Skills:
+- Python scripting
+- Kafka, Redis
+
+Experience: 5 years of DevOps / infrastructure experience.
+Education: Bachelor's degree in Computer Science or equivalent.

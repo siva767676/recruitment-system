@@ -1,0 +1,57 @@
+# Recruitment Management System — full stack in one command:
+#
+#   docker compose up --build
+#
+# Then open http://localhost:3000
+#
+# - frontend (nginx) serves the built React SPA and reverse-proxies /api -> backend
+# - backend (FastAPI) serves the API and persists its SQLite DB + uploaded resumes
+#   on a named volume
+# - the LLM (vLLM) runs on a remote GPU host, reached directly by IP
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: recruitment-backend
+    env_file:
+      - ./backend/.env
+    environment:
+      # DB + uploads live on the mounted volume (see below).
+      DATABASE_URL: sqlite:////app/appdata/recruitment.db
+      UPLOADS_DIR: /app/appdata/uploads
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - backend_data:/app/appdata
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=3).status==200 else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: recruitment-frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    restart: unless-stopped
+
+volumes:
+  backend_data:

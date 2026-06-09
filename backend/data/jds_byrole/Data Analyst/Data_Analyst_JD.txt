@@ -1,0 +1,17 @@
+Data Analyst
+
+Looking for a Data Analyst to turn raw data into actionable insights.
+
+Required Skills:
+- Strong SQL and data analysis skills
+- Python with pandas and numpy
+- Data visualisation with Tableau or Power BI
+- Statistics
+
+Preferred Skills:
+- Machine learning, scikit-learn
+- ETL and Spark
+- Excel
+
+Experience: 3 years of data analytics experience required.
+Education: Bachelor's degree in Statistics, Mathematics or related field.

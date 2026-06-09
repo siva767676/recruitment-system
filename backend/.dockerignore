@@ -1,0 +1,19 @@
+# Don't ship local dev artifacts into the image.
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Local DB and uploaded files (recreated/persisted via the volume at runtime).
+recruitment.db
+recruitment.db-journal
+uploads/
+appdata/
+
+# Local secrets and logs (env is injected by compose).
+.env
+server.log
+*.log
+
+# Anything frontend-related (built separately).
+../frontend
