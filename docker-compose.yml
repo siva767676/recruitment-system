@@ -55,3 +55,14 @@ services:
 
 volumes:
   backend_data:
+
+# Pin the project network to a subnet that does NOT overlap the office LAN.
+# Docker auto-assigned 172.20.0.0/16, which swallowed the GPU host
+# (172.20.7.22) — packets to vLLM never left the bridge. With a
+# non-overlapping subnet the container reaches the GPU host directly,
+# no host port-proxy needed.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 192.168.228.0/24

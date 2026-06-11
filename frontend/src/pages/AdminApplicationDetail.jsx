@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import {
-  adminApplicationDetail, adminOverrideStatus, adminRescreen, adminResume,
+  adminApplicationDetail, adminOverrideStatus, adminProctor, adminRescreen,
+  adminResume, adminSnapshotUrl, adminTerminate,
 } from '../lib/api.js'
 import { Alert, Card, ScoreBadge, Spinner, StatusBadge } from '../components/ui.jsx'
 
@@ -21,11 +22,32 @@ export default function AdminApplicationDetail() {
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
 
+  const [proctor, setProctor] = useState(null)
+
   const load = () => {
     adminApplicationDetail(id).then((d) => { setApp(d); setNewStatus(d.status); setNote(d.admin_note || '') }).catch((e) => setError(e.message))
     adminResume(id).then(setResume).catch(() => {})
+    adminProctor(id).then(setProctor).catch(() => {})
   }
   useEffect(load, [id])
+
+  // Live-ish monitoring: while a stage is running, refresh the proctor report
+  // every 10s so new violations and snapshots appear without a manual reload.
+  useEffect(() => {
+    if (!app?.status?.endsWith('in_progress')) return
+    const t = setInterval(() => adminProctor(id).then(setProctor).catch(() => {}), 10000)
+    return () => clearInterval(t)
+  }, [id, app?.status])
+
+  const terminate = async (stage) => {
+    if (!window.confirm(`Terminate this candidate's ${stage} now?`)) return
+    setBusy(true); setError(''); setMsg('')
+    try {
+      await adminTerminate(id, stage, 'Terminated manually by admin.')
+      setMsg(`${stage} terminated.`)
+      load()
+    } catch (e) { setError(e.message) } finally { setBusy(false) }
+  }
 
   const override = async () => {
     setBusy(true); setError(''); setMsg('')
@@ -62,6 +84,11 @@ export default function AdminApplicationDetail() {
 
       <Alert>{error}</Alert>
       {msg && <Alert kind="success">{msg}</Alert>}
+      {app.flagged && (
+        <div className="border border-rose-300 bg-rose-50 text-rose-700 rounded-xl px-4 py-3 text-sm">
+          🚩 <b>Flagged for review:</b> {app.flag_reason || 'proctoring violations'}
+        </div>
+      )}
 
       <div className="grid lg:grid-cols-3 gap-6">
         {/* Left: scores + admin controls */}
@@ -92,6 +119,31 @@ export default function AdminApplicationDetail() {
             </button>
             {app.manual_override && <p className="text-xs text-amber-600">⚠ Manually overridden — auto-transitions are paused.</p>}
           </Card>
+
+          {proctor && (
+            <Card className="p-5 space-y-3">
+              <h3 className="font-semibold">Proctoring</h3>
+              <Row label={`Exam violations (limit ${proctor.threshold})`} v={proctor.exam_score} />
+              <Row label={`Interview violations (limit ${proctor.threshold})`} v={proctor.interview_score} />
+              {proctor.exam_terminated && <p className="text-xs text-rose-600">Exam was terminated.</p>}
+              {proctor.interview_terminated && <p className="text-xs text-rose-600">Interview was terminated.</p>}
+              {app.status === 'exam_in_progress' && !proctor.exam_terminated && (
+                <button onClick={() => terminate('exam')} disabled={busy}
+                  className="w-full text-sm border border-rose-300 text-rose-600 hover:bg-rose-50 rounded-lg py-2">
+                  ■ Terminate exam now
+                </button>
+              )}
+              {app.status === 'interview_in_progress' && !proctor.interview_terminated && (
+                <button onClick={() => terminate('interview')} disabled={busy}
+                  className="w-full text-sm border border-rose-300 text-rose-600 hover:bg-rose-50 rounded-lg py-2">
+                  ■ Terminate interview now
+                </button>
+              )}
+              {app.status?.endsWith('in_progress') && (
+                <p className="text-xs text-slate-400">Live: refreshes every 10s.</p>
+              )}
+            </Card>
+          )}
         </div>
 
         {/* Right: details */}
@@ -170,6 +222,39 @@ export default function AdminApplicationDetail() {
             </Card>
           )}
 
+          {proctor && proctor.events?.length > 0 && (
+            <Card className="p-5 space-y-3">
+              <h3 className="font-semibold">Violation timeline ({proctor.events.length} events)</h3>
+              <div className="max-h-64 overflow-y-auto space-y-1.5 pr-1">
+                {proctor.events.map((e) => (
+                  <div key={e.id} className="flex items-center justify-between text-sm border-b border-slate-100 pb-1.5">
+                    <span>
+                      <span className={`font-medium ${e.points >= 15 ? 'text-rose-600' : e.points > 0 ? 'text-amber-600' : 'text-slate-500'}`}>
+                        {e.type.replace(/_/g, ' ')}
+                      </span>
+                      <span className="text-slate-400"> · {e.stage}</span>
+                      {e.detail && <span className="text-slate-400 text-xs"> — {e.detail}</span>}
+                    </span>
+                    <span className="text-xs text-slate-400 whitespace-nowrap ml-2">
+                      +{e.points} · {e.created_at ? new Date(e.created_at).toLocaleTimeString() : ''}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
+
+          {proctor && proctor.snapshots?.length > 0 && (
+            <Card className="p-5 space-y-3">
+              <h3 className="font-semibold">Camera snapshots ({proctor.snapshots.length})</h3>
+              <div className="grid grid-cols-3 md:grid-cols-4 gap-2">
+                {proctor.snapshots.slice(0, 12).map((name) => (
+                  <Snapshot key={name} appId={id} name={name} />
+                ))}
+              </div>
+            </Card>
+          )}
+
           <Card className="p-5">
             <h3 className="font-semibold mb-2">Resume ({app.resume_filename})</h3>
             <pre className="text-xs text-slate-600 whitespace-pre-wrap max-h-96 overflow-auto bg-slate-50 rounded-lg p-3">
@@ -184,6 +269,26 @@ export default function AdminApplicationDetail() {
 
 function Row({ label, v }) {
   return <div className="flex justify-between text-sm"><span className="text-slate-500">{label}</span><ScoreBadge score={v} /></div>
+}
+
+// Snapshots are behind admin auth, so <img src> can't load them directly —
+// fetch with the bearer token and render the blob.
+function Snapshot({ appId, name }) {
+  const [url, setUrl] = useState(null)
+  useEffect(() => {
+    let revoked = false
+    let objectUrl = null
+    adminSnapshotUrl(appId, name)
+      .then((u) => { objectUrl = u; if (!revoked) setUrl(u) })
+      .catch(() => {})
+    return () => { revoked = true; if (objectUrl) URL.revokeObjectURL(objectUrl) }
+  }, [appId, name])
+  if (!url) return <div className="aspect-video bg-slate-100 rounded animate-pulse" />
+  return (
+    <a href={url} target="_blank" rel="noreferrer" title={name}>
+      <img src={url} alt={name} className="aspect-video object-cover rounded border border-slate-200" />
+    </a>
+  )
 }
 function Mini({ label, v, of10 }) {
   return (

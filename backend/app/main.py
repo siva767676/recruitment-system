@@ -13,6 +13,7 @@ from .database import init_db
 from .routes_admin import router as admin_router
 from .routes_auth import router as auth_router
 from .routes_candidate import router as candidate_router
+from .routes_proctor import router as proctor_router
 from .scoring import embeddings_available
 from .seed import seed_jobs
 
@@ -28,6 +29,7 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(candidate_router)
+app.include_router(proctor_router)
 app.include_router(admin_router)
 
 

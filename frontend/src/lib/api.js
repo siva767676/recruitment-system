@@ -61,9 +61,32 @@ export const applyToJob = (jobId, file) => {
 }
 export const startExam = (id) => api.post(`/candidate/applications/${id}/exam/start`)
 export const submitExam = (id, answers) => api.post(`/candidate/applications/${id}/exam/submit`, { answers })
+export const saveExamDraft = (id, answers) => api.post(`/candidate/applications/${id}/exam/save`, { answers })
 export const startInterview = (id) => api.post(`/candidate/applications/${id}/interview/start`)
 export const interviewAnswer = (id, threadId, answer) =>
   api.post(`/candidate/applications/${id}/interview/answer`, { thread_id: threadId, answer })
+
+// --- proctoring ---
+export const proctorEvent = (id, stage, type, detail = '') =>
+  api.post(`/candidate/applications/${id}/proctor/event`, { stage, type, detail })
+export const proctorSnapshot = (id, stage, blob) => {
+  const fd = new FormData()
+  fd.append('stage', stage)
+  fd.append('frame', blob, 'frame.jpg')
+  return api.postForm(`/candidate/applications/${id}/proctor/snapshot`, fd)
+}
+export const adminProctor = (id) => api.get(`/admin/applications/${id}/proctor`)
+export const adminTerminate = (id, stage, reason) =>
+  api.post(`/admin/applications/${id}/terminate`, { stage, reason })
+// Snapshots need the auth header, so <img src> can't load them directly —
+// fetch as a blob and hand back an object URL.
+export const adminSnapshotUrl = async (id, name) => {
+  const res = await fetch(`${BASE}/admin/applications/${id}/proctor/snapshots/${name}`, {
+    headers: { Authorization: `Bearer ${token()}` },
+  })
+  if (!res.ok) throw new Error(`Snapshot failed (${res.status})`)
+  return URL.createObjectURL(await res.blob())
+}
 
 // --- admin ---
 export const adminJobs = () => api.get('/admin/jobs')

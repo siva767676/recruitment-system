@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from . import exam_service, interview_service, pipeline
 from .auth import current_user
-from .config import UPLOADS_DIR
+from .config import EXAM_DURATION_SECONDS, UPLOADS_DIR
 from .database import (Application, Exam, InterviewSession, Job, User, get_db)
 from .extractor import clean_text, extract_text_from_bytes
 from .llm import LLMUnavailable, check_server as check_model
@@ -21,6 +21,17 @@ router = APIRouter(prefix="/api/candidate", tags=["candidate"])
 
 def _now():
     return datetime.now(timezone.utc)
+
+
+def _remaining_seconds(exam) -> int:
+    """Server-authoritative exam clock; SQLite returns naive UTC datetimes."""
+    if not exam.started_at or not exam.duration_seconds:
+        return exam.duration_seconds or EXAM_DURATION_SECONDS
+    started = exam.started_at
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    elapsed = (_now() - started).total_seconds()
+    return max(0, int(exam.duration_seconds - elapsed))
 
 
 # ----------------------------------------------------------------- jobs
@@ -103,20 +114,46 @@ def start_exam(app_id: int, db: Session = Depends(get_db),
         raise HTTPException(400, "Assessment is not available at your current stage.")
     if app.exam and app.exam.submitted_at:
         raise HTTPException(409, "You have already submitted this assessment.")
+    if app.exam and app.exam.terminated_at:
+        raise HTTPException(409, "Your assessment was terminated due to proctoring "
+                                 "violations and is under review.")
 
     if app.exam is None:
         exam_model = exam_service.generate_exam(
             resume_text=app.resume_text or "", job_title=app.job.title,
             job_description=app.job.description)
         questions = exam_service.exam_to_question_list(exam_model)
-        exam = Exam(application_id=app.id, questions=json.dumps(questions))
+        exam = Exam(application_id=app.id, questions=json.dumps(questions),
+                    duration_seconds=EXAM_DURATION_SECONDS)
         db.add(exam)
         app.status = "exam_in_progress"
         db.commit()
         db.refresh(exam)
     else:
         exam = app.exam
-    return exam.to_dict(with_questions=True)
+    d = exam.to_dict(with_questions=True)
+    d["remaining_seconds"] = _remaining_seconds(exam)
+    # Reconnect recovery: hand back the autosaved draft so nothing is lost.
+    d["draft"] = json.loads(exam.draft_answers) if exam.draft_answers else {}
+    return d
+
+
+class DraftSave(BaseModel):
+    answers: dict
+
+
+@router.post("/applications/{app_id}/exam/save")
+def save_exam_draft(app_id: int, payload: DraftSave,
+                    db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """Autosave endpoint — called every few seconds while the exam runs."""
+    app = _owned_app(db, app_id, user)
+    if not app.exam:
+        raise HTTPException(400, "No assessment has been started.")
+    if app.exam.submitted_at or app.exam.terminated_at:
+        raise HTTPException(409, "Assessment is closed.")
+    app.exam.draft_answers = json.dumps(payload.answers or {})
+    db.commit()
+    return {"saved": True, "remaining_seconds": _remaining_seconds(app.exam)}
 
 
 class ExamSubmission(BaseModel):
@@ -131,10 +168,14 @@ def submit_exam(app_id: int, payload: ExamSubmission,
         raise HTTPException(400, "No assessment has been started.")
     if app.exam.submitted_at:
         raise HTTPException(409, "Assessment already submitted.")
+    if app.exam.terminated_at:
+        raise HTTPException(409, "Your assessment was terminated due to proctoring "
+                                 "violations and is under review.")
 
     questions = json.loads(app.exam.questions or "[]")
     result = exam_service.evaluate_exam(questions, payload.answers or {})
     app.exam.answers = json.dumps(payload.answers or {})
+    app.exam.draft_answers = None
     app.exam.score = result["score"]
     app.exam.max_score = result["max_score"]
     app.exam.evaluation = json.dumps(result["per_question"])
@@ -187,6 +228,9 @@ def start_interview(app_id: int, db: Session = Depends(get_db),
         raise HTTPException(400, "The interview is not available at your current stage.")
     if app.interview and app.interview.completed:
         raise HTTPException(409, "Your interview is already complete.")
+    if app.interview and app.interview.terminated_at:
+        raise HTTPException(409, "Your interview was terminated due to proctoring "
+                                 "violations and is under review.")
 
     # Pre-flight: fail fast and clearly if the model server is down, rather than
     # letting a raw provider error surface from inside the LangGraph node.
@@ -215,6 +259,9 @@ def interview_answer(app_id: int, payload: AnswerRequest,
     app = _owned_app(db, app_id, user)
     if not app.interview:
         raise HTTPException(404, "Interview session not found.")
+    if app.interview.terminated_at:
+        raise HTTPException(409, "Your interview was terminated due to proctoring "
+                                 "violations and is under review.")
     # The client's thread_id can lag the DB if the interview was (re)started
     # concurrently — e.g. a double-mounted start effect. The application owns at
     # most one live session, so drive the answer through the current row's

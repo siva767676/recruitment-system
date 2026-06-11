@@ -5,12 +5,13 @@ import json
 from collections import Counter
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from . import pipeline
+from . import pipeline, proctor_service
 from .auth import require_admin
+from .config import UPLOADS_DIR
 from .database import (STATUSES, Application, InterviewSession, Job, User,
                        get_db)
 
@@ -160,6 +161,48 @@ def override_status(app_id: int, body: StatusOverride, db: Session = Depends(get
     db.commit()
     db.refresh(app)
     return app.to_dict()
+
+
+# ----------------------------------------------------------------- proctoring
+@router.get("/applications/{app_id}/proctor")
+def proctor_report(app_id: int, db: Session = Depends(get_db)):
+    """Violation score, full event timeline, and snapshot list for one candidate."""
+    app = db.query(Application).get(app_id)
+    if not app:
+        raise HTTPException(404, "Application not found.")
+    return proctor_service.summary(db, app)
+
+
+@router.get("/applications/{app_id}/proctor/snapshots/{name}")
+def proctor_snapshot(app_id: int, name: str):
+    # No path traversal: the name must be exactly a file inside this app's dir.
+    if "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(400, "Invalid snapshot name.")
+    path = UPLOADS_DIR / "proctor" / str(app_id) / name
+    if not path.is_file():
+        raise HTTPException(404, "Snapshot not found.")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+class TerminateRequest(BaseModel):
+    stage: str            # "exam" | "interview"
+    reason: str = "Terminated manually by admin."
+
+
+@router.post("/applications/{app_id}/terminate")
+def terminate(app_id: int, body: TerminateRequest, db: Session = Depends(get_db)):
+    """Manual termination control — same effect as a threshold breach."""
+    app = db.query(Application).get(app_id)
+    if not app:
+        raise HTTPException(404, "Application not found.")
+    if body.stage not in proctor_service.STAGES:
+        raise HTTPException(400, "Invalid stage.")
+    done = proctor_service.terminate_stage(db, app, body.stage, body.reason, by="admin")
+    if not done:
+        raise HTTPException(409, f"No active {body.stage} to terminate.")
+    db.commit()
+    db.refresh(app)
+    return {"terminated": body.stage, "application": app.to_dict()}
 
 
 @router.get("/interviews/{app_id}")

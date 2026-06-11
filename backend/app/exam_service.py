@@ -22,6 +22,7 @@ from .parser import parse_resume
 class MCQ(BaseModel):
     type: Literal["mcq"] = "mcq"
     source: Literal["resume", "jd", "aptitude"]
+    difficulty: Literal["easy", "medium", "hard"] = "medium"
     topic: str
     question: str
     options: List[str] = Field(min_length=2, max_length=6)
@@ -32,6 +33,7 @@ class MCQ(BaseModel):
 class ShortAnswer(BaseModel):
     type: Literal["short"] = "short"
     source: Literal["resume", "jd", "aptitude"]
+    difficulty: Literal["easy", "medium", "hard"] = "medium"
     topic: str
     question: str
     expected_points: List[str] = Field(default_factory=list)
@@ -79,6 +81,13 @@ def _fallback_exam(resume_skills: List[str]) -> GeneratedExam:
     return GeneratedExam(mcqs=mcqs, short_answers=shorts)
 
 
+# Fairness blueprint: every candidate gets DIFFERENT questions but the SAME
+# structure — identical source mix, difficulty distribution, and grading
+# rubric — so scores are comparable across candidates.
+_MCQ_BLUEPRINT = "2 from 'resume', 2 from 'jd', 2 from 'aptitude'"
+_DIFFICULTY_BLUEPRINT = "2 easy, 3 medium, 1 hard (spread across sources)"
+
+
 def generate_exam(*, resume_text: str, job_title: str, job_description: str,
                   num_mcq: int = 6, num_short: int = 2) -> GeneratedExam:
     """Generate a tailored assessment. LLM-backed with a deterministic fallback."""
@@ -86,6 +95,8 @@ def generate_exam(*, resume_text: str, job_title: str, job_description: str,
     try:
         model = llm.structured(GeneratedExam, temperature=0.5)
         prompt = f"""You are an assessment designer creating an online screening test.
+All candidates for this role must receive an EQUIVALENT test: unique questions,
+but the exact same structure, difficulty mix, and grading standard below.
 
 Role: {job_title}
 Job description:
@@ -95,16 +106,27 @@ Candidate resume:
 {llm.clip(resume_text, 6000)}
 
 Create exactly {num_mcq} multiple-choice questions and {num_short} short-answer questions.
-Distribute the MCQs across these sources:
-- "resume": probe a skill/project the candidate actually claims.
-- "jd": test technical knowledge the job requires.
-- "aptitude": a standard aptitude/logical/numerical question.
-Each MCQ must have 4 plausible options and exactly one correct option
-(correct_index points to it). Make distractors realistic.
-Short-answer questions should be answerable in a few sentences and grounded in
-the resume or JD; list 2-3 expected_points for grading.
-Keep questions unambiguous and self-contained."""
+
+MCQ blueprint (mandatory):
+- Sources: {_MCQ_BLUEPRINT}.
+  - "resume": probe a skill/project the candidate actually claims.
+  - "jd": test technical knowledge the job requires.
+  - "aptitude": standard logical / numerical / verbal reasoning.
+- Difficulty: {_DIFFICULTY_BLUEPRINT}. Label each question's difficulty honestly:
+  easy = recall/definition, medium = application, hard = multi-step reasoning.
+- Each MCQ must have exactly 4 plausible options and exactly one correct option
+  (correct_index points to it). Make distractors realistic.
+
+Short-answer blueprint (mandatory):
+- {num_short} questions, both difficulty "medium": one grounded in the resume,
+  one grounded in the JD.
+- Answerable in a few sentences; list 2-3 expected_points capturing the facts a
+  complete answer must mention. Graders score ONLY against expected_points, so
+  make them objective and verifiable, not stylistic.
+
+Keep every question unambiguous, self-contained, and free of trick wording."""
         exam = model.invoke(prompt)
+        exam = _normalize_exam(exam, num_mcq, num_short)
         # Guard against an empty generation.
         if exam.mcqs:
             return exam
@@ -113,6 +135,19 @@ Keep questions unambiguous and self-contained."""
     except Exception:  # noqa: BLE001 -> any LLM hiccup falls back
         pass
     return _fallback_exam(resume_skills)
+
+
+def _normalize_exam(exam: GeneratedExam, num_mcq: int, num_short: int) -> GeneratedExam:
+    """Enforce the blueprint server-side: drop malformed questions, clamp counts.
+
+    The structured-output schema guarantees shape, but not semantics — a
+    correct_index can still point outside the options list. Anything invalid is
+    dropped rather than shown to a candidate.
+    """
+    mcqs = [q for q in exam.mcqs
+            if len(q.options) >= 2 and 0 <= q.correct_index < len(q.options)]
+    shorts = list(exam.short_answers)
+    return GeneratedExam(mcqs=mcqs[:num_mcq], short_answers=shorts[:num_short])
 
 
 def exam_to_question_list(exam: GeneratedExam) -> List[dict]:
@@ -174,16 +209,19 @@ def _grade_short_answer(q: dict, answer: str) -> dict:
     try:
         model = llm.structured(ShortAnswerGrade, temperature=0.1)
         expected = "; ".join(q.get("expected_points", [])) or "(none specified)"
-        prompt = f"""Grade this short answer from 0 to 10.
+        prompt = f"""Grade this short answer from 0 to 10 using ONLY this anchored scale,
+so every candidate is graded to the same standard:
+- 0-2: off-topic, empty, or factually wrong.
+- 3-5: partially correct; misses most expected points.
+- 6-8: covers most expected points with minor gaps or imprecision.
+- 9-10: covers all expected points accurately and concretely.
+Grade content against the expected points only — ignore grammar, length, and style.
 
 Question: {q.get('question')}
 Expected points: {expected}
 
 Candidate answer:
-{answer}
-
-Be fair but strict: empty or off-topic answers score low; complete, correct
-answers score high."""
+{answer}"""
         g = model.invoke(prompt)
         return {"score": g.score, "feedback": g.feedback}
     except Exception:  # noqa: BLE001 -> length-based heuristic fallback
